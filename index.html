@@ -1,1 +1,324 @@
 
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Office Party Staff Scanner</title>
+
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 18px;
+      background: #f3f4f6;
+      font-family: Arial, sans-serif;
+      color: #172033;
+    }
+
+    .container {
+      max-width: 480px;
+      margin: auto;
+      background: white;
+      padding: 22px;
+      border-radius: 16px;
+      box-shadow: 0 4px 18px #00000012;
+    }
+
+    h2 { text-align: center; margin-top: 4px; }
+
+    input, button {
+      width: 100%;
+      padding: 14px;
+      margin-top: 12px;
+      border-radius: 9px;
+      font-size: 16px;
+    }
+
+    input { border: 1px solid #cbd5e1; }
+
+    button {
+      border: 0;
+      background: #174ea6;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:disabled { opacity: .5; }
+
+    .secondary { background: #475569; }
+    .danger { background: #b91c1c; }
+
+    #reader {
+      margin-top: 18px;
+      width: 100%;
+    }
+
+    #result {
+      margin-top: 18px;
+      padding: 18px;
+      border-radius: 10px;
+      text-align: center;
+      font-weight: bold;
+      white-space: pre-line;
+      display: none;
+    }
+
+    .approved { background: #dcfce7; color: #166534; }
+    .rejected { background: #fee2e2; color: #991b1b; }
+    .info { background: #e0f2fe; color: #075985; }
+
+    .summary {
+      background: #f1f5f9;
+      border-radius: 10px;
+      padding: 14px;
+      margin-top: 18px;
+      line-height: 1.8;
+    }
+
+    .hidden { display: none; }
+
+    .small {
+      color: #64748b;
+      font-size: 13px;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+<div class="container">
+
+  <h2>Office Party</h2>
+  <p class="small">Staff Drink Redemption Scanner</p>
+
+  <div id="login">
+    <h3>Staff Authentication</h3>
+    <input
+      type="password"
+      id="pin"
+      placeholder="Enter staff PIN"
+      autocomplete="current-password">
+    <button onclick="login()">Access Scanner</button>
+    <div id="loginMessage" class="small"></div>
+  </div>
+
+  <div id="scannerArea" class="hidden">
+
+    <div id="reader"></div>
+
+    <button id="startButton" onclick="startScanner()">
+      Start QR Scanner
+    </button>
+
+    <button class="secondary" onclick="stopScanner()">
+      Stop Scanner
+    </button>
+
+    <div id="result"></div>
+
+    <button class="secondary" onclick="refreshSummary()">
+      Refresh Drink Summary
+    </button>
+
+    <div id="summary" class="summary">
+      Loading summary...
+    </div>
+
+    <button class="danger" onclick="logout()">
+      Logout
+    </button>
+  </div>
+
+</div>
+
+<script>
+  let staffPin = '';
+  let scanner = null;
+  let scanning = false;
+  let processing = false;
+  let lastToken = '';
+  let lastScanTime = 0;
+
+  function showResult(message, type) {
+    const box = document.getElementById('result');
+    box.className = type;
+    box.textContent = message;
+    box.style.display = 'block';
+  }
+
+  function login() {
+    const pin = document.getElementById('pin').value.trim();
+
+    if (!pin) {
+      document.getElementById('loginMessage').textContent =
+        'Please enter your staff PIN.';
+      return;
+    }
+
+    document.getElementById('loginMessage').textContent =
+      'Checking PIN...';
+
+    google.script.run
+      .withSuccessHandler(function(data) {
+        staffPin = pin;
+        document.getElementById('login').classList.add('hidden');
+        document.getElementById('scannerArea').classList.remove('hidden');
+        document.getElementById('loginMessage').textContent = '';
+        refreshSummary();
+      })
+      .withFailureHandler(function(error) {
+        document.getElementById('loginMessage').textContent =
+          'Incorrect PIN or server error. Please try again.';
+      })
+      .getStaffSummary(pin);
+  }
+
+  function extractToken(text) {
+    const value = String(text || '').trim();
+
+    try {
+      const url = new URL(value);
+      const token = url.searchParams.get('token');
+      if (token) return token;
+    } catch (e) {}
+
+    // Also support scanning a QR containing only the token.
+    // Reject unexpected text rather than treating it as a token.
+    if (/^[a-f0-9-]{60,}$/i.test(value)) return value;
+
+    return null;
+  }
+
+  function onScanSuccess(decodedText) {
+    if (processing) return;
+
+    const now = Date.now();
+
+    // Ignore repeated camera frames of the same QR.
+    if (decodedText === lastToken && now - lastScanTime < 5000) {
+      return;
+    }
+
+    lastToken = decodedText;
+    lastScanTime = now;
+
+    const token = extractToken(decodedText);
+
+    if (!token) {
+      showResult('INVALID QR CODE\nThis is not a recognised voucher format.', 'rejected');
+      return;
+    }
+
+    processing = true;
+    showResult('Checking voucher...', 'info');
+
+    google.script.run
+      .withSuccessHandler(function(response) {
+        processing = false;
+
+        if (response && response.ok) {
+          showResult(
+            response.message + '\n\nGuest: ' + response.name +
+            '\nDrinks redeemed: ' + response.redeemed +
+            '\nRemaining: ' + response.remaining,
+            'approved'
+          );
+          refreshSummary();
+        } else {
+          showResult(
+            (response && response.message) || 'Redemption rejected.',
+            'rejected'
+          );
+          refreshSummary();
+        }
+      })
+      .withFailureHandler(function(error) {
+        processing = false;
+        showResult('SERVER ERROR\nPlease check your connection and try again.', 'rejected');
+      })
+      .redeemDrink(token, staffPin);
+  }
+
+  async function startScanner() {
+    if (scanning) return;
+
+    try {
+      if (!window.Html5Qrcode) {
+        showResult('QR scanner library could not load. Check your internet connection.', 'rejected');
+        return;
+      }
+
+      if (!scanner) {
+        scanner = new Html5Qrcode('reader');
+      }
+
+      await scanner.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: { width: 240, height: 240 },
+          aspectRatio: 1
+        },
+        onScanSuccess,
+        function() {}
+      );
+
+      scanning = true;
+      document.getElementById('startButton').disabled = true;
+
+    } catch (error) {
+      showResult(
+        'Unable to start camera.\nAllow camera access and use HTTPS.',
+        'rejected'
+      );
+    }
+  }
+
+  async function stopScanner() {
+    if (scanner && scanning) {
+      try {
+        await scanner.stop();
+        scanning = false;
+        document.getElementById('startButton').disabled = false;
+      } catch (error) {
+        showResult('Unable to stop camera.', 'rejected');
+      }
+    }
+  }
+
+  function refreshSummary() {
+    google.script.run
+      .withSuccessHandler(function(data) {
+        document.getElementById('summary').textContent =
+          'Guest count: ' + data.guests +
+          '\nDrinks allowed: ' + data.allowed +
+          '\nDrinks redeemed: ' + data.redeemed +
+          '\nDrinks remaining: ' + data.remaining;
+      })
+      .withFailureHandler(function() {
+        document.getElementById('summary').textContent =
+          'Unable to load summary.';
+      })
+      .getStaffSummary(staffPin);
+  }
+
+  async function logout() {
+    await stopScanner();
+
+    staffPin = '';
+    processing = false;
+    lastToken = '';
+    document.getElementById('pin').value = '';
+    document.getElementById('scannerArea').classList.add('hidden');
+    document.getElementById('login').classList.remove('hidden');
+    document.getElementById('result').style.display = 'none';
+  }
+</script>
+</body>
+</html>
+
